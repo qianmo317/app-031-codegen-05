@@ -20,6 +20,7 @@
 7. **余料登记与闭环**：每张板剩余矩形按面积降序记录，两边 ≥300mm 标为可用；一键登记后，在新项目零件清单页勾选即以「小板材」身份**优先参与下一轮排样**，用掉自动标记已用。
 8. **手工微调**：排样图上可拖动零件到余料矩形或与同尺寸零件交换；每次松手立即做 guillotine 合法性校验并重新生成刀路，非贯通排法拒绝并撤销。
 9. **导出**：排样图、裁切步骤表、下料单/领料单、A4 不干胶标签（每块零件一张），浏览器打印/另存 PDF；项目可导出/导入 JSON。
+10. **开料工单排产（两台锯）**：把已算好摆法/刀路的一批活按交期倒着排进机台与班次。同规格板修边刀叠切算一次工步、内部刀路完全一致的板叠切算一次、同刀向连续排；**工步刀数直接取裁切刀路 `steps`，不另估**。按「板数×搬运秒 + 刀数×每刀秒」估每段工时并向上取整一刻钟；换刀向/换板种/换厚度各有独立等待分钟。策略「先插急件 / 按交期顺做」二选一并写明取舍代价；算出每单一刻钟口径完工时刻、点名赶不上交期的单；改机速/加班次整表重排并逐单列出换机台、完工时刻变化与排产表变化行；选错且已存档/导出的版本可作废回退、提示撤回已发出的旧表。工单页（`/schedule`、`/schedule/job/:id`）、项目列表页、导出 CSV/打印三处**只消费同一个已发布版本**。时间整数分钟、面积 mm² 折 m²（2 位小数），无班次/班次太短/天数内满班/未排样都会说明卡在哪。
 
 ## 目录结构
 
@@ -35,11 +36,14 @@ app-031/
 │   │   ├── packing.ts           # guillotine 排样 + 随手排基线
 │   │   ├── cuts.ts              # 刀路合并排序 + 逐刀模拟器 + 微调重算
 │   │   ├── geometry.ts          # guillotine 合法性校验
-│   │   ├── selftest.ts          # 100 组随机自动化断言
+│   │   ├── selftest.ts          # 100 组随机 + 排产同源/策略/diff/卡点自动化断言
 │   │   ├── store.ts             # reactive 单例 + localStorage
+│   │   ├── schedule.ts          # 排产引擎（刀路同源工步、班次落活、策略、diff、CSV）
+│   │   ├── scheduleStore.ts     # 排产版本存档/发布/导出标记/作废回退（三处取数同源）
+│   │   ├── printSchedule.ts     # 排产表打印状态
 │   │   └── print.ts / format.ts / colors.ts / ui.ts
-│   ├── components/SheetDiagram.vue / PrintDocument.vue
-│   └── views/ Home / Parts / Nest / Cut / Stats / Offcuts / Export
+│   ├── components/SheetDiagram.vue / PrintDocument.vue / SchedulePrintDocument.vue
+│   └── views/ Home / Parts / Nest / Cut / Stats / Offcuts / Export / Schedule / ScheduleJob
 ├── Dockerfile / docker-compose.yml / nginx.conf
 └── .dockerignore / .gitignore
 ```

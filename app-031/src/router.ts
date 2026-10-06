@@ -9,6 +9,8 @@ export const router = createRouter({
     { path: '/cut/:id', name: 'cut', component: () => import('./views/CutView.vue') },
     { path: '/stats/:id', name: 'stats', component: () => import('./views/StatsView.vue') },
     { path: '/offcuts', name: 'offcuts', component: () => import('./views/OffcutsView.vue') },
-    { path: '/export/:id', name: 'export', component: () => import('./views/ExportView.vue') }
+    { path: '/export/:id', name: 'export', component: () => import('./views/ExportView.vue') },
+    { path: '/schedule', name: 'schedule', component: () => import('./views/ScheduleView.vue') },
+    { path: '/schedule/job/:id', name: 'schedule-job', component: () => import('./views/ScheduleJobView.vue') }
   ]
 })

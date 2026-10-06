@@ -5,6 +5,16 @@ import type { Board, Job, Part } from '../types'
 import { nestJob } from './packing'
 import { simulate, countSawOps } from './cuts'
 import { guillotineViolation, type Rect } from './geometry'
+import {
+  DEFAULT_PARAMS,
+  buildJobOps,
+  cutFingerprint,
+  defaultMachines,
+  defaultShifts,
+  diffVersions,
+  midnightOf,
+  runSchedule
+} from './schedule'
 
 export interface CheckResult {
   name: string
@@ -439,6 +449,141 @@ export function runSelfTest(): SelfTestReport {
       ok,
       `18mm 用 ${thickSheets} 张（库存 1，需补采）、9mm 用 ${thinSheets} 张`
     )
+  }
+
+  // 10) 排产引擎：工步刀数与刀路同源、一刻钟取整、两条策略、换型等待、卡住原因、重排 diff
+  const makeSchedulableJob = (name: string, qty: number, boards: Board[] = [makeBoard()]): Job => {
+    const j = makeJob([makePart({ code: name, lenMm: 480, widMm: 398, qty })], {
+      boards,
+      kerfMm: 3.2,
+      trimMm: 8
+    })
+    j.id = `sch_${name}`
+    j.name = name
+    j.result = nestJob(j)
+    return j
+  }
+  const H0 = midnightOf('2026-10-05')
+  const schInput = (
+    jobs: Job[],
+    policy: 'urgent-first' | 'edd',
+    over: { machines?: ReturnType<typeof defaultMachines>; shifts?: ReturnType<typeof defaultShifts>; days?: number } = {}
+  ) =>
+    runSchedule({
+      jobs,
+      machines: over.machines ?? defaultMachines(),
+      shifts: over.shifts ?? defaultShifts(),
+      params: { ...DEFAULT_PARAMS, horizonDays: over.days ?? 5 },
+      policy,
+      horizonStartDate: '2026-10-05'
+    })
+
+  // 10a) 工步刀数 = 刀路步骤数；同规格多板修边叠切 1 次
+  {
+    const job = makeSchedulableJob('同源', 30) // 自检已知：2 张同规格板
+    const ops = buildJobOps(job, DEFAULT_PARAMS)
+    const trims = ops.filter((o) => o.kind === 'trim')
+    const cuts = ops.filter((o) => o.kind === 'cut')
+    const roadTrim = job.result!.sheets[0].steps.filter((s) => s.kind === 'trim').length
+    const roadCut = job.result!.sheets[0].steps.filter((s) => s.kind === 'cut').length
+    const okOneTrim = trims.length === 1 && trims[0].bladeCount === roadTrim && trims[0].stackSheets === 2
+    const okCut = cuts.length === 1 && cuts[0].bladeCount === roadCut
+    add(
+      '排产工步刀数与刀路同源（修边叠切 1 次、刀数取刀路）',
+      !!okOneTrim && !!okCut,
+      `trim ${trims.length} 组/${trims[0]?.bladeCount} 刀（刀路 ${roadTrim}），cut ${cuts.length} 组/${cuts[0]?.bladeCount} 刀（刀路 ${roadCut}）`
+    )
+  }
+
+  // 10b) 加工时长向上取整一刻钟；完工时刻也是 15 分倍数
+  {
+    const job = makeSchedulableJob('取整', 2)
+    const v = schInput([job], 'edd')
+    const ok =
+      v.jobs[0].workMin > 0 &&
+      v.jobs[0].workMin % 15 === 0 &&
+      v.jobs[0].finishQuarterMin % 15 === 0 &&
+      v.jobs[0].finishQuarterMin >= v.jobs[0].endMin
+    add('加工时长与完工时刻向上取整到一刻钟', !!ok, `加工 ${v.jobs[0]?.workMin} 分`)
+  }
+
+  // 10c) 两条策略只能选一条：急件交期最晚也先上锯
+  {
+    const jobs = [
+      makeSchedulableJob('S1', 24),
+      makeSchedulableJob('S2', 24),
+      makeSchedulableJob('SU', 24),
+      makeSchedulableJob('S3', 24)
+    ]
+    jobs[0].dueAt = (H0 + 2 * 1440 + 12 * 60) * 60000
+    jobs[1].dueAt = (H0 + 2 * 1440 + 13 * 60) * 60000
+    jobs[2].dueAt = (H0 + 4 * 1440 + 18 * 60) * 60000
+    jobs[2].urgent = true
+    jobs[3].dueAt = (H0 + 3 * 1440 + 12 * 60) * 60000
+    const edd = schInput(jobs, 'edd')
+    const urg = schInput(jobs, 'urgent-first')
+    const firstOf = (v: typeof edd) =>
+      v.rows.reduce((a, b) => (a.startMin <= b.startMin ? a : b)).op.jobName
+    const ok = firstOf(edd) === 'S1' && firstOf(urg) === 'SU'
+    add('先插急件 / 按交期顺做二选一且顺序正确', ok, `EDD 首单 ${firstOf(edd)}，急件策略首单 ${firstOf(urg)}`)
+  }
+
+  // 10d) 换厚度/板种产生换型等待（整数分钟），改机速整表重排 diff 点名
+  {
+    const thin = makeBoard({ id: 'thin9', name: '背板9', thicknessMm: 9 })
+    const job: Job = (() => {
+      const j = makeJob(
+        [
+          makePart({ code: 'TT', lenMm: 1000, widMm: 600, qty: 3, boardId: 'b0' }),
+          makePart({ code: 'BB', lenMm: 900, widMm: 500, qty: 2, boardId: 'thin9' })
+        ],
+        { boards: [makeBoard({ id: 'b0' }), thin] }
+      )
+      j.result = nestJob(j)
+      return j
+    })()
+    const v = schInput([job], 'edd')
+    const setups = v.rows.filter((r) => r.op.kind === 'setup')
+    const okSetup = setups.length >= 1
+    // 提速：qty 大到落不同一刻钟档（120 件 → 30 分档；1.4× → 15 分档）
+    const heavy = [makeSchedulableJob('H1', 120), makeSchedulableJob('H2', 120), makeSchedulableJob('H3', 120)]
+    const a = schInput(heavy, 'edd')
+    const faster = defaultMachines()
+    faster[0].speedFactor = 1.4
+    const b = schInput(heavy, 'edd', { machines: faster })
+    const d = diffVersions(a, b)
+    const okDiff = d.finishChanged.length + d.machineChanged.length > 0
+    add(
+      '换厚度/板种有等待行；改机速重排逐单点出变化',
+      okSetup && okDiff,
+      `等待行 ${setups.length}；换机台 ${d.machineChanged.length}、完工变 ${d.finishChanged.length}、行变化 ${d.rowsChanged}`
+    )
+  }
+
+  // 10e) 两台机都没班次 / 工步长过班次：必须说明卡在哪
+  {
+    const job = makeSchedulableJob('卡', 10)
+    const noShift = schInput(
+      [job],
+      'edd',
+      { machines: defaultMachines().map((m) => ({ ...m, shiftIds: [] })) }
+    )
+    const short = schInput([job], 'edd', {
+      machines: defaultMachines().map((m) => ({ ...m, shiftIds: ['s'] })),
+      shifts: [{ id: 's', name: '短班', startMin: 480, endMin: 490, weekdays: [] }]
+    })
+    const ok =
+      noShift.unscheduled[0]?.reason.includes('没有可用班次') &&
+      short.unscheduled[0]?.reason.includes('一个班次做不完')
+    add('无班次/班次太短时点名卡点', !!ok, `${noShift.unscheduled[0]?.reason}；${short.unscheduled[0]?.reason}`)
+  }
+
+  // 10f) 刀路一改指纹就变（排产不许沿用旧刀数）
+  {
+    const j1 = makeSchedulableJob('FP', 30)
+    const j2 = makeSchedulableJob('FP', 31)
+    add('刀路变化（板数/刀数）→ 排产指纹变化', cutFingerprint(j1) !== cutFingerprint(j2),
+      cutFingerprint(j1) === cutFingerprint(j2) ? '指纹相同（异常）' : '两版刀路指纹不同')
   }
 
   const elapsedMs = Math.round(performance.now() - t0)

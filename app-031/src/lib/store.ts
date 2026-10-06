@@ -114,6 +114,16 @@ export function saveJob(_job: Job): void {
   persist()
 }
 
+/** 排产输入：交期 / 急件标记（改动后生效排产表会被识别为过期，需重新发布）。 */
+export function setJobScheduleFields(
+  job: Job,
+  patch: { dueAt?: number | null; urgent?: boolean }
+): void {
+  if (patch.dueAt !== undefined) job.dueAt = patch.dueAt ?? undefined
+  if (patch.urgent !== undefined) job.urgent = patch.urgent
+  persist()
+}
+
 export function getJob(id: string): Job | undefined {
   init()
   return state.jobs.find((j) => j.id === id)

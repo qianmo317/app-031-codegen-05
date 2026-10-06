@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useToasts } from './lib/ui'
 import PrintDocument from './components/PrintDocument.vue'
+import SchedulePrintDocument from './components/SchedulePrintDocument.vue'
 
 const route = useRoute()
 const { toasts } = useToasts()
@@ -12,6 +13,7 @@ const tabs = [
   { to: 'nest', label: '排样结果' },
   { to: 'cut', label: '裁切步骤' },
   { to: 'stats', label: '材料统计' },
+  { to: 'schedule/job', label: '工单排产' },
   { to: 'export', label: '导出打印' }
 ]
 </script>
@@ -35,6 +37,7 @@ const tabs = [
           >{{ t.label }}</router-link>
         </nav>
         <div class="spacer" />
+        <router-link to="/schedule" class="offcut-link">排产</router-link>
         <router-link to="/offcuts" class="offcut-link">余料登记</router-link>
       </div>
     </header>
@@ -50,6 +53,7 @@ const tabs = [
     </div>
 
     <PrintDocument />
+    <SchedulePrintDocument />
   </div>
 </template>
 

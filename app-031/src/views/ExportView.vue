@@ -3,11 +3,16 @@ import { computed, reactive } from 'vue'
 import { useRoute } from 'vue-router'
 import { getJob, exportJobJson } from '../lib/store'
 import { printJob, type PrintSection } from '../lib/print'
+import { currentVersion, markExported, useScheduleStore } from '../lib/scheduleStore'
+import { scheduleToCsv, fmtClock, fmtDue } from '../lib/schedule'
+import { printSchedule } from '../lib/printSchedule'
 import { downloadText } from '../lib/format'
 import { toast } from '../lib/ui'
 
 const route = useRoute()
 const job = computed(() => getJob(route.params.id as string))
+useScheduleStore()
+const schedule = currentVersion
 
 const sections = reactive<Record<PrintSection, boolean>>({
   nest: true,
@@ -39,6 +44,27 @@ function exportJson(): void {
   downloadText(`开料项目_${safe}_${job.value.id.slice(-4)}.json`, exportJobJson(job.value), 'application/json')
   toast('已导出项目 JSON（可在首页导回）', 'good')
 }
+
+const mySchedule = computed(() => schedule.value?.jobs.find((j) => j.jobId === route.params.id))
+function exportScheduleCsv(): void {
+  const v = schedule.value
+  if (!v) {
+    toast('还没有已发布的排产表', 'bad')
+    return
+  }
+  downloadText(`开料排产表_${v.horizonStartDate}_${v.id.slice(-6)}.csv`, scheduleToCsv(v), 'text/csv')
+  markExported(v.id)
+  toast('排产表已导出（与工单页、项目列表同源的同一份）', 'good')
+}
+function printScheduleDoc(): void {
+  const v = schedule.value
+  if (!v) {
+    toast('还没有已发布的排产表', 'bad')
+    return
+  }
+  printSchedule(v.id)
+  markExported(v.id)
+}
 </script>
 
 <template>
@@ -68,6 +94,28 @@ function exportJson(): void {
     <section v-if="!job.result" class="panel" style="margin-top: 14px">
       <p class="muted">该项目尚未排样，打印内容将不完整。</p>
       <router-link :to="`/parts/${job.id}`"><button class="primary">去录零件并排样</button></router-link>
+    </section>
+
+    <section class="panel" style="margin-top: 14px">
+      <h3 style="font-size: 14px; margin-bottom: 8px">排产表（与工单页、项目列表同源的一份）</h3>
+      <div v-if="mySchedule" class="row wrap" style="gap: 10px">
+        <span class="tag">{{ mySchedule.machineName }}</span>
+        <span class="small">
+          完工（一刻钟口径）<b>{{ fmtClock(mySchedule.finishQuarterMin) }}</b>
+        </span>
+        <span class="small muted">交期 {{ fmtDue(mySchedule.dueAt) }}</span>
+        <span :class="['tag', mySchedule.late ? 'bad' : 'good']">
+          {{ mySchedule.late ? `赶不上（晚 ${mySchedule.lateMin} 分）` : '赶得上' }}
+        </span>
+        <span v-if="schedule?.exported" class="tag warn">当前排产表已导出/打印发出</span>
+        <div class="spacer" />
+        <button class="sm" @click="exportScheduleCsv">导出排产表 CSV</button>
+        <button class="sm" @click="printScheduleDoc">🖨 打印排产表</button>
+      </div>
+      <p v-else class="small muted">
+        该单还不在已发布的排产表里。先到
+        <router-link to="/schedule">开料工单排产</router-link>排产并发布；发布后此处导出的表与项目列表上的完工时刻同一份。
+      </p>
     </section>
 
     <section class="panel" style="margin-top: 14px">

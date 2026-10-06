@@ -12,9 +12,12 @@ import {
 import { runSelfTest, type SelfTestReport } from '../lib/selftest'
 import { toast } from '../lib/ui'
 import { pct, money } from '../lib/format'
+import { jobScheduleStatus, previewSchedule, useScheduleStore } from '../lib/scheduleStore'
+import { fmtClock, fmtDue } from '../lib/schedule'
 
 const router = useRouter()
 const { state } = useStore()
+useScheduleStore()
 const newName = ref('')
 const showSelfTest = ref(false)
 const report = ref<SelfTestReport | null>(null)
@@ -23,6 +26,14 @@ const fileInput = ref<HTMLInputElement | null>(null)
 
 const jobs = computed(() => state.jobs)
 const availableOffcuts = computed(() => state.offcuts.filter((o) => o.available).length)
+// 全局重算预览仅用于发现"生效排产表已过期"（项目列表与工单页同源，不许挂旧完工时刻）
+const schedulePreview = computed(() => previewSchedule(state.jobs))
+const staleHint = computed(() => schedulePreview.value.stale)
+const staleNames = computed(() => schedulePreview.value.staleJobs)
+
+function schedOf(jobId: string): ReturnType<typeof jobScheduleStatus> {
+  return jobScheduleStatus(jobId)
+}
 
 function totalQty(jobId: string): number {
   const j = state.jobs.find((x) => x.id === jobId)
@@ -114,11 +125,18 @@ function onFile(e: Event): void {
     <div class="row wrap" style="margin: 16px 0 10px">
       <h2 style="font-size: 16px">项目列表（{{ jobs.length }}）</h2>
       <div class="spacer" />
+      <router-link to="/schedule" class="tag good">开料工单排产（两台锯 · 按班次）→</router-link>
       <router-link to="/offcuts" class="tag good">可用余料 {{ availableOffcuts }} 块 →</router-link>
       <button class="sm" @click="showSelfTest = !showSelfTest">
         {{ showSelfTest ? '收起' : '运行' }}算法自检（100 组随机断言）
       </button>
     </div>
+
+    <section v-if="staleHint" class="panel stale-bar no-print">
+      <b class="bad">⚠ 生效排产表已过期：</b>
+      {{ staleNames.join('、') }} 的刀路或交期已改动，当前列表上的完工时刻仍是旧版（与旧导出表一致）；重排发布后工单页、本列表与导出表会一起刷新。
+      <router-link to="/schedule"><button class="primary sm" style="margin-left: 10px">去重排发布</button></router-link>
+    </section>
 
     <section v-if="showSelfTest" class="panel selftest no-print">
       <div class="row">
@@ -130,7 +148,8 @@ function onFile(e: Event): void {
         </span>
         <span class="muted small">
           覆盖：100 组 guillotine 零反例、纹理零旋转、锯路/修边、守恒、封边复算、
-          30 件 ≤20 刀且逐刀模拟还原、余料再利用、300 件 &lt;1.5s、微调合法性
+          30 件 ≤20 刀且逐刀模拟还原、余料再利用、300 件 &lt;1.5s、微调合法性、
+          排产工步刀数与刀路同源、两条策略、换型等待、改机速重排 diff、卡点说明
         </span>
       </div>
       <table v-if="report" class="grid" style="margin-top: 10px">
@@ -177,10 +196,27 @@ function onFile(e: Event): void {
           {{ (job.result.edgeBandM.exposed + job.result.edgeBandM.normal).toFixed(1) }}m
         </p>
         <div v-else style="height: 34px"></div>
+
+        <!-- 排产完工时刻与交期状态：与工单页/导出表同源（currentVersion） -->
+        <div v-if="schedOf(job.id).scheduled" class="sched-line">
+          <span class="tag">{{ schedOf(job.id).machineName }}</span>
+          <span class="small">完工 <b>{{ fmtClock(schedOf(job.id).finishQuarterMin!) }}</b></span>
+          <span class="small muted">交期 {{ fmtDue(job.dueAt) }}</span>
+          <span :class="['tag', schedOf(job.id).late ? 'bad' : 'good']">
+            {{ schedOf(job.id).late ? `赶不上（晚 ${schedOf(job.id).lateMin} 分）` : '赶得上' }}
+          </span>
+          <span v-if="schedOf(job.id).exported" class="tag">表已发出</span>
+        </div>
+        <div v-else-if="job.dueAt" class="sched-line">
+          <span class="tag warn">未进排产表</span>
+          <span class="small muted">交期 {{ fmtDue(job.dueAt) }}</span>
+        </div>
+
         <div class="row">
           <router-link :to="`/parts/${job.id}`" class="btn-link">零件清单</router-link>
           <router-link :to="`/nest/${job.id}`" class="btn-link">排样</router-link>
           <router-link :to="`/stats/${job.id}`" class="btn-link">统计</router-link>
+          <router-link :to="`/schedule/job/${job.id}`" class="btn-link">工单排产</router-link>
           <div class="spacer" />
           <button class="sm" @click="onDuplicate(job.id)">复制</button>
           <button class="sm ghost-danger" @click="onDelete(job.id, job.name)">删除</button>
@@ -250,5 +286,20 @@ function onFile(e: Event): void {
 .btn-link {
   font-size: 13px;
   padding: 4px 8px;
+}
+.stale-bar {
+  margin-bottom: 16px;
+  background: #fffbeb;
+  border-color: #f0d9b5;
+}
+.sched-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+  padding: 7px 9px;
+  background: #f4f7f3;
+  border-radius: 6px;
 }
 </style>
