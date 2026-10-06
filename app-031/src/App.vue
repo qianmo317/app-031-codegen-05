@@ -35,6 +35,7 @@ const tabs = [
           >{{ t.label }}</router-link>
         </nav>
         <div class="spacer" />
+        <router-link to="/schedule" class="offcut-link">工单排产</router-link>
         <router-link to="/offcuts" class="offcut-link">余料登记</router-link>
       </div>
     </header>

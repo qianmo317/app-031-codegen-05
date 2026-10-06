@@ -9,12 +9,18 @@ import {
   createSampleJob,
   importJobJson
 } from '../lib/store'
+import { useSchedule } from '../lib/scheduleStore'
+import { clockOf, dateStrOf } from '../lib/schedule'
 import { runSelfTest, type SelfTestReport } from '../lib/selftest'
 import { toast } from '../lib/ui'
 import { pct, money } from '../lib/format'
 
 const router = useRouter()
 const { state } = useStore()
+// 项目列表与工单页/导出单据同源：完工时刻与超期判定都取自这份 live 排产
+const { live } = useSchedule()
+const schedByJob = computed(() => new Map(live.value.scheduled.map((s) => [s.jobId, s])))
+const unschedByJob = computed(() => new Map(live.value.unscheduled.map((u) => [u.jobId, u])))
 const newName = ref('')
 const showSelfTest = ref(false)
 const report = ref<SelfTestReport | null>(null)
@@ -114,6 +120,7 @@ function onFile(e: Event): void {
     <div class="row wrap" style="margin: 16px 0 10px">
       <h2 style="font-size: 16px">项目列表（{{ jobs.length }}）</h2>
       <div class="spacer" />
+      <router-link to="/schedule" class="tag warn">工单排产 →</router-link>
       <router-link to="/offcuts" class="tag good">可用余料 {{ availableOffcuts }} 块 →</router-link>
       <button class="sm" @click="showSelfTest = !showSelfTest">
         {{ showSelfTest ? '收起' : '运行' }}算法自检（100 组随机断言）
@@ -176,7 +183,20 @@ function onFile(e: Event): void {
           约省 {{ money(job.result.savedCents) }} ｜ 封边
           {{ (job.result.edgeBandM.exposed + job.result.edgeBandM.normal).toFixed(1) }}m
         </p>
-        <div v-else style="height: 34px"></div>
+        <!-- 排产状态：与工单排产页同一份完工时刻 -->
+        <p v-if="schedByJob.get(job.id)" class="small sched-line">
+          计划完工 <b>{{ schedByJob.get(job.id)!.date }} {{ clockOf(schedByJob.get(job.id)!.finishMin) }}</b>
+          （{{ schedByJob.get(job.id)!.machineName }} · {{ schedByJob.get(job.id)!.shiftName }}）
+          <span v-if="schedByJob.get(job.id)!.overdue" class="tag bad">超交期</span>
+          <span v-else class="tag good">可按期</span>
+          <span v-if="job.rush" class="tag warn">急件</span>
+          <span v-if="job.dueAt !== undefined" class="muted">交期 {{ dateStrOf(job.dueAt) }}</span>
+        </p>
+        <p v-else-if="unschedByJob.get(job.id)" class="small sched-line">
+          <span class="tag bad">排不进</span>
+          <span class="muted">{{ unschedByJob.get(job.id)!.reason }}</span>
+        </p>
+        <div v-else style="height: 4px"></div>
         <div class="row">
           <router-link :to="`/parts/${job.id}`" class="btn-link">零件清单</router-link>
           <router-link :to="`/nest/${job.id}`" class="btn-link">排样</router-link>
@@ -250,5 +270,12 @@ function onFile(e: Event): void {
 .btn-link {
   font-size: 13px;
   padding: 4px 8px;
+}
+.sched-line {
+  margin: 4px 0 8px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 </style>

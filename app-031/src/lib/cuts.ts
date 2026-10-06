@@ -389,18 +389,68 @@ export function simulate(
   return { ok: errors.length === 0, errors, leaves }
 }
 
-/** 车间实际锯切工步数：修边刀同规格板只算一次（叠切），内部刀按板计。 */
-export function countSawOps(sheets: SheetResult[]): number {
-  const trimKeys = new Set<string>()
-  let internal = 0
-  for (const s of sheets) {
+/**
+ * 车间锯切工步：排产与刀路同源的唯一取数口。
+ * 直接由每张板的裁切步骤（sheet.steps）聚合而来，不另估刀数：
+ *  - 修边刀：同规格（同尺寸）板可叠在一起切，整张任务只算一次工步；
+ *  - 内部贯通刀：按板计，一板一刀序；
+ * 返回顺序即车间执行顺序：修边工步在前（同刀向相连排在一块），内部刀按板顺序在后。
+ */
+export interface SawWorkStep {
+  key: string
+  kind: 'trim' | 'cut'
+  axis: 'v' | 'h'
+  at: number
+  span: [number, number]
+  sheetIndices: number[] // 本工步叠切的板（修边=同规格全部板；内部刀=单张板）
+  label: string
+}
+
+export function buildSawWorkSteps(sheets: SheetResult[]): SawWorkStep[] {
+  const trimMap = new Map<string, SawWorkStep>()
+  sheets.forEach((s, si) => {
     for (const st of s.steps) {
-      if (st.kind === 'trim') {
-        trimKeys.add(`${s.wMm}x${s.hMm}-${st.axis}@${st.at}`)
+      if (st.kind !== 'trim') continue
+      const key = `${s.wMm}x${s.hMm}-${st.axis}@${st.at}`
+      const cur = trimMap.get(key)
+      if (cur) {
+        cur.sheetIndices.push(si)
       } else {
-        internal++
+        trimMap.set(key, {
+          key,
+          kind: 'trim',
+          axis: st.axis,
+          at: st.at,
+          span: [st.span[0], st.span[1]],
+          sheetIndices: [si],
+          label: st.label
+        })
       }
     }
-  }
-  return trimKeys.size + internal
+  })
+  // 同一刀向连着切：修边工步按 横刀组 → 竖刀组 排列（组内按坐标）
+  const trims = [...trimMap.values()].sort((a, b) =>
+    a.axis === b.axis ? a.at - b.at : a.axis === 'h' ? -1 : 1
+  )
+  const internals: SawWorkStep[] = []
+  sheets.forEach((s, si) => {
+    for (const st of s.steps) {
+      if (st.kind === 'trim') continue
+      internals.push({
+        key: `s${si}#${st.order}`,
+        kind: 'cut',
+        axis: st.axis,
+        at: st.at,
+        span: [st.span[0], st.span[1]],
+        sheetIndices: [si],
+        label: st.label
+      })
+    }
+  })
+  return [...trims, ...internals]
+}
+
+/** 车间实际锯切工步数：与 buildSawWorkSteps 同源（修边叠切计一次，内部刀按板计）。 */
+export function countSawOps(sheets: SheetResult[]): number {
+  return buildSawWorkSteps(sheets).length
 }

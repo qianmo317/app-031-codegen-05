@@ -1,10 +1,17 @@
 // 自动化断言（规格书 §8/§10 强制）：
 // guillotine 100 组随机零反例、纹理零旋转、锯路/修边、守恒、封边复算、
-// 30 零件锯切工步 ≤20 且模拟器还原、余料再利用、300 零件性能 <1.5s。
-import type { Board, Job, Part } from '../types'
+// 30 零件锯切工步 ≤20 且模拟器还原、余料再利用、300 零件性能 <1.5s；
+// 排产：工步与刀路同源、完工时刻复算、策略取舍、排不进原因、重排差异。
+import type { Board, Job, Part, SheetResult } from '../types'
 import { nestJob } from './packing'
-import { simulate, countSawOps } from './cuts'
+import { simulate, countSawOps, buildSawWorkSteps } from './cuts'
 import { guillotineViolation, type Rect } from './geometry'
+import {
+  ceilQuarter,
+  computeSchedule,
+  compareSchedules,
+  type ScheduleConfig
+} from './schedule'
 
 export interface CheckResult {
   name: string
@@ -438,6 +445,217 @@ export function runSelfTest(): SelfTestReport {
       '多板种混排且 18mm 库存仅 1 张时超开并提示补采',
       ok,
       `18mm 用 ${thickSheets} 张（库存 1，需补采）、9mm 用 ${thinSheets} 张`
+    )
+  }
+
+  // 10) 排产工步与裁切刀路同源：同规格板修边叠切计一次，工步数 = countSawOps
+  {
+    const job = makeJob([makePart({ code: 'S', lenMm: 480, widMm: 398, qty: 30, grain: 'none' })])
+    const r = nestJob(job)
+    const ws = buildSawWorkSteps(r.sheets)
+    const trims = ws.filter((w) => w.kind === 'trim')
+    const okTrimStack = trims.length === 4 && trims.every((t) => t.sheetIndices.length === r.sheets.length)
+    const okSame = ws.length === countSawOps(r.sheets)
+    add(
+      '排产工步与裁切刀路同源（同规格修边叠切计一次）',
+      okSame && okTrimStack,
+      `${r.sheets.length} 张板 → ${ws.length} 个工步（修边 ${trims.length} 步 × 叠 ${r.sheets.length} 板），与 countSawOps 一致`
+    )
+  }
+
+  // 排产测试夹具：假板（给定刀路）与假工单
+  const fakeSheet = (
+    steps: { axis: 'v' | 'h'; span: number; kind?: 'trim' | 'cut' }[],
+    over: { material?: string; thicknessMm?: number } = {}
+  ): SheetResult => ({
+    index: 0,
+    boardId: 'fb',
+    boardName: '假板',
+    material: over.material ?? '颗粒板',
+    thicknessMm: over.thicknessMm ?? 18,
+    wMm: 2440,
+    hMm: 1220,
+    priceCents: 0,
+    placements: [],
+    steps: steps.map((s, i) => ({
+      boardIndex: 0,
+      axis: s.axis,
+      at: 0,
+      span: [0, s.span] as [number, number],
+      order: i,
+      kind: s.kind ?? ('cut' as const),
+      label: ''
+    })),
+    usedAreaMm2: 0,
+    boardAreaMm2: 2440 * 1220,
+    utilization: 0,
+    offcuts: []
+  })
+  const fakeSchedJob = (
+    id: string,
+    sheets: SheetResult[],
+    opts: { due?: string; rush?: boolean } = {}
+  ): Job => {
+    sheets.forEach((s, i) => (s.index = i))
+    return {
+      id,
+      name: id,
+      createdAt: 0,
+      boards: [],
+      parts: [],
+      kerfMm: 3.2,
+      trimMm: 8,
+      useOffcutIds: [],
+      batchByCabinet: false,
+      dueAt: opts.due ? new Date(`${opts.due}T00:00:00`).getTime() : undefined,
+      rush: opts.rush ?? false,
+      result: {
+        sheets,
+        boardsUsed: sheets.length,
+        boardsByType: {},
+        edgeBandM: { exposed: 0, normal: 0 },
+        unplaced: [],
+        baselineBoards: 0,
+        savedBoards: 0,
+        savedCents: 0,
+        totalCostCents: 0,
+        stockShortage: [],
+        elapsedMs: 0,
+        generatedAt: 0
+      }
+    }
+  }
+  const demoSteps = (): { axis: 'v' | 'h'; span: number; kind?: 'trim' | 'cut' }[] => [
+    { axis: 'h', span: 2000, kind: 'trim' },
+    { axis: 'v', span: 1000 },
+    { axis: 'v', span: 500 }
+  ]
+  const oneMachine: ScheduleConfig = {
+    machines: [
+      {
+        id: 'm1',
+        name: 'M1',
+        cutSpeedMmPerMin: 1000,
+        shifts: [{ id: 's1', name: '白班', startMin: 480, endMin: 720 }]
+      }
+    ],
+    toolChangeMin: 10,
+    materialChangeMin: 20,
+    thicknessChangeMin: 15,
+    sheetHandlingMin: 0,
+    strategy: 'due',
+    horizonDays: 1
+  }
+
+  // 11) 完工时刻复算：EDD 顺序、机台选择、刻钟取整、超期点名、面积 m² 折算
+  {
+    const DAY = '2026-10-06'
+    const cfg: ScheduleConfig = {
+      ...oneMachine,
+      horizonDays: 2,
+      machines: [
+        oneMachine.machines[0],
+        {
+          id: 'm2',
+          name: 'M2',
+          cutSpeedMmPerMin: 2000,
+          shifts: [{ id: 's1', name: '白班', startMin: 480, endMin: 720 }]
+        }
+      ]
+    }
+    const jA = fakeSchedJob('A', [fakeSheet(demoSteps())], { due: '2026-10-07' })
+    const jB = fakeSchedJob('B', [fakeSheet(demoSteps())], { due: '2026-10-07' })
+    const jC = fakeSchedJob('C', [fakeSheet(demoSteps())], { due: '2026-10-05' })
+    const res = computeSchedule([jA, jB, jC], cfg, DAY)
+    const A = res.scheduled.find((s) => s.jobId === 'A')!
+    const B = res.scheduled.find((s) => s.jobId === 'B')!
+    const C = res.scheduled.find((s) => s.jobId === 'C')!
+    // 每单：加工 3500/1000=3.5 + 活内换刀向 1×10 = 13.5 → 取整 15 分钟
+    // C 交期最早先上 M1 08:00~08:15；A 上空的 M2 08:00~08:15；
+    // B 接班需换刀向 +10 → 23.5 → 取整 30 → M1 08:15~08:45
+    const okTime =
+      C.machineId === 'm1' && C.startMin === 480 && C.finishMin === 495 &&
+      A.machineId === 'm2' && A.finishMin === 495 &&
+      B.machineId === 'm1' && B.startMin === 495 && B.finishMin === 525
+    const okOverdue = C.overdue && !A.overdue && !B.overdue
+    const okQuarter =
+      ceilQuarter(0) === 0 && ceilQuarter(1) === 15 && ceilQuarter(15) === 15 &&
+      ceilQuarter(16) === 30 && ceilQuarter(100) === 105
+    const okArea = A.areaMm2 === 2440 * 1220 && (A.areaMm2 / 1_000_000).toFixed(2) === '2.98'
+    add(
+      '排产完工时刻复算：机台选择、刻钟取整、超期点名、面积折算',
+      okTime && okOverdue && okQuarter && okArea,
+      `期望 C=M1 480~495(超期)、A=M2 ~495、B=M1 495~525；实测 C=${C.machineId} ${C.startMin}~${C.finishMin} A=${A.machineId} ~${A.finishMin} B=${B.machineId} ${B.startMin}~${B.finishMin}`
+    )
+  }
+
+  // 12) 策略二选一的取舍可复算：急件插队在先，后面的单被推晚
+  {
+    const DAY = '2026-10-06'
+    const jN = fakeSchedJob('N', [fakeSheet(demoSteps())], { due: '2026-10-07' })
+    const jR = fakeSchedJob('R', [fakeSheet(demoSteps())], { due: '2026-10-09', rush: true })
+    const dueRes = computeSchedule([jN, jR], oneMachine, DAY)
+    const rushRes = computeSchedule([jN, jR], { ...oneMachine, strategy: 'rush' }, DAY)
+    const fin = (r: typeof dueRes, id: string): number =>
+      r.scheduled.find((s) => s.jobId === id)!.finishMin
+    const ok =
+      fin(dueRes, 'N') === 495 && fin(dueRes, 'R') === 525 &&
+      fin(rushRes, 'R') === 495 && fin(rushRes, 'N') === 525 &&
+      fin(rushRes, 'R') < fin(dueRes, 'R') && fin(rushRes, 'N') > fin(dueRes, 'N')
+    add(
+      '策略取舍：急件插队赶出急单、后单被推晚',
+      ok,
+      `按交期 N=495/R=525 → 急件优先 R=495/N=525（急单提前 30 分钟，普通单推晚 30 分钟）`
+    )
+  }
+
+  // 13) 排不进时点名卡在哪：单活超班 / 两台机都满班
+  {
+    const DAY = '2026-10-06'
+    const jBig = fakeSchedJob('BIG', [fakeSheet([{ axis: 'v', span: 300000 }])])
+    const resBig = computeSchedule([jBig], oneMachine, DAY)
+    const okOver =
+      resBig.unscheduled.length === 1 && /超过最长班次/.test(resBig.unscheduled[0].reason)
+    const twoMachines: ScheduleConfig = {
+      ...oneMachine,
+      machines: [oneMachine.machines[0], { ...oneMachine.machines[0], id: 'm2', name: 'M2' }]
+    }
+    const jobs5 = Array.from({ length: 5 }, (_, i) =>
+      fakeSchedJob(`F${i}`, [fakeSheet([{ axis: 'v', span: 114000 }])], { due: '2026-10-07' })
+    )
+    const res5 = computeSchedule(jobs5, twoMachines, DAY)
+    const okFull =
+      res5.scheduled.length === 4 &&
+      res5.unscheduled.length === 1 &&
+      /排满/.test(res5.unscheduled[0].reason)
+    add(
+      '排不进时点名卡在哪（单活超班 / 两台机满班）',
+      okOver && okFull,
+      `超班：${resBig.unscheduled[0]?.reason ?? '未报'}；满班：4 单上机 + 1 单排不进`
+    )
+  }
+
+  // 14) 改机台速度 → 重排并逐单列出完工时刻与排产表行差异
+  {
+    const DAY = '2026-10-06'
+    const jX = fakeSchedJob('X', [fakeSheet([{ axis: 'v', span: 100000 }])], { due: '2026-10-07' })
+    const base = computeSchedule([jX], oneMachine, DAY) // 100 分钟 → 取整 105
+    const faster = computeSchedule(
+      [jX],
+      { ...oneMachine, machines: [{ ...oneMachine.machines[0], cutSpeedMmPerMin: 2000 }] },
+      DAY
+    ) // 50 分钟 → 取整 60
+    const d = compareSchedules(base, faster)
+    const ok =
+      d.timeChanged.length === 1 &&
+      d.timeChanged[0].deltaMin === -45 &&
+      d.rowsChanged.length === 1 &&
+      d.rowsChanged[0] === 1 &&
+      d.machineChanged.length === 0
+    add(
+      '改机台速度后逐单列出完工与排产表行差异',
+      ok,
+      `X 完工提前 45 分钟（105→60），排产表第 1 行变化，未换机台`
     )
   }
 

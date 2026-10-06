@@ -122,6 +122,8 @@ export interface Job {
   trimMm: number
   useOffcutIds: string[] // 参与本单排样的登记余料
   batchByCabinet: boolean // 按柜体批次分组开料
+  dueAt?: number // 交期（本地日期 00:00 的时间戳；空 = 未设交期，排产排最后）
+  rush?: boolean // 急件（仅「急件优先」策略下插队）
   result?: NestResult
 }
 

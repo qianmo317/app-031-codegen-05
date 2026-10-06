@@ -2,6 +2,8 @@
 import { computed } from 'vue'
 import { printState } from '../lib/print'
 import { getJob } from '../lib/store'
+import { useSchedule } from '../lib/scheduleStore'
+import { exportRows, clockOf, dateStrOf } from '../lib/schedule'
 import boardsData from '../data/boards.json'
 import SheetDiagram from './SheetDiagram.vue'
 import { money, mm } from '../lib/format'
@@ -9,6 +11,14 @@ import { money, mm } from '../lib/format'
 const job = computed(() => (printState.jobId ? getJob(printState.jobId) : undefined))
 const sections = computed(() => new Set(printState.sections))
 const now = computed(() => new Date().toLocaleString('zh-CN'))
+
+// 排产表打印：与工单页/项目列表页同源（scheduleStore 的 live 结果）
+const { live, schedState } = useSchedule()
+const isSchedulePrint = computed(() => sections.value.has('schedule'))
+const schedRows = computed(() => exportRows(live.value))
+const schedOfJob = computed(() =>
+  job.value ? live.value.scheduled.find((s) => s.jobId === job.value!.id) : undefined
+)
 
 const allInstances = computed(() => {
   if (!job.value?.result) return []
@@ -55,7 +65,67 @@ const boardByName = (name: string) =>
 </script>
 
 <template>
-  <div v-if="job" class="print-doc print-only">
+  <div v-if="job || isSchedulePrint" class="print-doc print-only">
+    <!-- 排产表（整表，与工单页/项目列表页同源） -->
+    <section v-if="isSchedulePrint" class="print-page">
+      <h2>开料工单排产表</h2>
+      <p class="doc-meta">
+        生成时间：{{ now }} ｜ 开工日：{{ live.startDay }} ｜ 排产 {{ live.horizonDays }} 天 ｜ 策略：{{ schedState.config.strategy === 'rush' ? '急件优先' : '按交期顺排' }}
+        ｜ 机台等待：换刀向 {{ schedState.config.toolChangeMin }}′ / 换板种 {{ schedState.config.materialChangeMin }}′ / 换厚度 {{ schedState.config.thicknessChangeMin }}′
+      </p>
+      <p class="doc-meta">
+        时间按分钟计、每单占用块向上取整到一刻钟（15 分钟）；面积按 mm² 累计、折算 m² 保留 2 位；工步(刀)数与裁切刀路同源（同规格板修边叠切算一次）。
+      </p>
+      <table class="pgrid">
+        <thead>
+          <tr>
+            <th>序号</th><th>项目</th><th>机台</th><th>日期</th><th>班次</th>
+            <th>开工</th><th>完工</th><th>占用(分钟)</th><th>板数</th><th>工步(刀)</th><th>面积m²</th><th>交期</th><th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="r in schedRows" :key="r.jobId">
+            <td>{{ r.no }}</td>
+            <td>{{ r.jobName }}</td>
+            <td>{{ r.machineName }}</td>
+            <td>{{ r.date }}</td>
+            <td>{{ r.shiftName }}</td>
+            <td>{{ r.startClock }}</td>
+            <td><b>{{ r.finishClock }}</b></td>
+            <td>{{ r.blockMin }}</td>
+            <td>{{ r.sheets }}</td>
+            <td>{{ r.ops }}</td>
+            <td>{{ (r.areaMm2 / 1_000_000).toFixed(2) }}</td>
+            <td>{{ r.dueText }}</td>
+            <td>{{ r.status }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <template v-if="live.unscheduled.length">
+        <h3>排不进的活（卡在哪）</h3>
+        <table class="pgrid">
+          <thead><tr><th>项目</th><th>板数</th><th>工步(刀)</th><th>原因</th></tr></thead>
+          <tbody>
+            <tr v-for="u in live.unscheduled" :key="u.jobId">
+              <td>{{ u.jobName }}</td><td>{{ u.sheets }}</td><td>{{ u.ops }}</td><td>{{ u.reason }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
+      <template v-if="live.skipped.length">
+        <h3>未纳入排产</h3>
+        <table class="pgrid">
+          <thead><tr><th>项目</th><th>原因</th></tr></thead>
+          <tbody>
+            <tr v-for="s in live.skipped" :key="s.jobId">
+              <td>{{ s.jobName }}</td><td>{{ s.reason }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
+    </section>
+
+    <template v-if="job">
     <!-- 排样图 -->
     <div v-if="sections.has('nest')">
       <section
@@ -126,7 +196,14 @@ const boardByName = (name: string) =>
     <div v-if="sections.has('order')">
       <section class="print-page">
         <h2>下料单 / 领料单</h2>
-        <p class="doc-meta">项目：{{ job.name }} ｜ 打印时间：{{ now }}</p>
+        <p class="doc-meta">
+          项目：{{ job.name }} ｜ 打印时间：{{ now }}
+          <template v-if="schedOfJob">
+            ｜ 计划完工：{{ schedOfJob.date }} {{ clockOf(schedOfJob.finishMin) }}（{{ schedOfJob.machineName }} · {{ schedOfJob.shiftName }}）
+            {{ schedOfJob.overdue ? '｜ ⚠ 超交期' : '' }}
+            <template v-if="job.dueAt !== undefined">｜ 交期：{{ dateStrOf(job.dueAt) }}</template>
+          </template>
+        </p>
 
         <h3>一、板材领料</h3>
         <table class="pgrid">
@@ -204,6 +281,7 @@ const boardByName = (name: string) =>
         </div>
       </section>
     </div>
+    </template>
   </div>
 </template>
 
